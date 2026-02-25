@@ -54,7 +54,7 @@ def run_web_app(
   </style>
 </head>
 <body>
-  <h1>Prompt Injection Test (Gemini)</h1>
+  <h1>Prompt Injection Test</h1>
   <p>セッションID: {{ session_id }}</p>
   <form method="post" action="{{ url_for('update_user_context') }}">
     <label for="user_context"><strong>User Context</strong></label><br>
