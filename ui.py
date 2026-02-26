@@ -46,6 +46,7 @@ def run_web_app(
     .msg { border: 1px solid #ccc; border-radius: 8px; padding: 10px; margin: 8px 0; }
     .user { background: #f5faff; }
     .assistant { background: #f8f8f8; }
+    .security { background: #fffcf0; border-color: #fbc02d; }
     .leak { border-color: #d32f2f; }
     textarea { width: 100%; min-height: 80px; }
     button { margin-right: 8px; }
@@ -75,9 +76,15 @@ def run_web_app(
     </form>
   </div>
   <hr>
-  {% for role, text, leaked, show_flag in messages %}
+    {% for role, text, leaked, show_flag in messages %}
     <div class="msg {{ role }} {% if leaked %}leak{% endif %}">
-      <strong>{{ role }}</strong>{% if leaked and show_flag %} [LEAK DETECTED]{% endif %}<br>
+      <strong>
+        {% if role == 'security' %}🛡️ Security Guard
+        {% elif role == 'assistant' %}🤖 AI Assistant
+        {% elif role == 'user' %}👤 User
+        {% else %}{{ role }}{% endif %}
+      </strong>
+      {% if leaked and show_flag %} [LEAK DETECTED]{% endif %}<br>
       <pre style="white-space: pre-wrap; margin: 6px 0 0 0;">{{ text }}</pre>
     </div>
   {% endfor %}
@@ -117,7 +124,7 @@ def run_web_app(
             return redirect(url_for("index"))
 
         user_history.clear()
-        messages.append(("assistant", "[INFO] User Context を更新し、新しい会話セッションを開始しました。", False, False))
+        messages.append(("security", "[INFO] User Context を更新し、新しい会話セッションを開始しました。", False, False))
         return redirect(url_for("index"))
 
     @app.post("/send")
@@ -127,11 +134,11 @@ def run_web_app(
         if not text:
             return redirect(url_for("index"))
 
-        input_class = classify_sensitive_content_cached(text=text)
+        input_class = classify_sensitive_content_cached(text=text, client=client)
         if input_class.is_sensitive:
             messages.append(
                 (
-                    "assistant",
+                    "security",
                     f"[INPUT RISK:{input_class.risk}] {', '.join(input_class.categories) or input_class.rationale}",
                     False,
                     False,
@@ -156,6 +163,9 @@ def run_web_app(
         user_history.append(text)
         messages.append(("user", text, False, False))
         flag = "リーク" if leaked else "安全"
+        if leaked:
+            messages.append(("security", f"[LEAK DETECTED] セキュリティ保護のため、AIの回答を遮断しました。", True, False))
+        
         answer = f"[{flag}] {answer}"
         messages.append(("assistant", answer, leaked, True))
         return redirect(url_for("index"))
