@@ -6,15 +6,13 @@ from uuid import uuid4
 
 from backend import (
     ConversationLogger,
-    run_cli,
 )
 from ui import run_web_app
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Prompt Injection Test Chat (Gemini)")
+    parser = argparse.ArgumentParser(description="Prompt Injection (Registry LLM)")
     parser.add_argument("--log-file", default="logs/chat_log.log")
-    parser.add_argument("--web", action="store_true", help="FlaskのWeb UIで起動")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
@@ -28,20 +26,12 @@ def main() -> int:
     session_id = uuid4().hex[:12]
     logger = ConversationLogger(path=Path(args.log_file), session_id=session_id)
 
-    if args.web:
-        return run_web_app(
-            api_key=api_key,
-            user_context=user_context,
-            logger=logger,
-            host=args.host,
-            port=args.port,
-        )
-
-    return run_cli(
+    return run_web_app(
         api_key=api_key,
         user_context=user_context,
         logger=logger,
-        log_file=args.log_file,
+        host=args.host,
+        port=args.port,
     )
 
 

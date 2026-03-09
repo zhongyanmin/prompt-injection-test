@@ -1,2 +1,6 @@
-# 実行コマンド
-python app.py --web
+# 仮想環境アクティブ
+.venv\Scripts\Activate.ps1
+# アプリ起動
+python app.py
+# ブラウザでアクセス
+http://127.0.0.1:8000/

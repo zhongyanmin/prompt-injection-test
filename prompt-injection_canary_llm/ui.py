@@ -3,13 +3,12 @@ from typing import List
 
 from backend import (
     ConversationLogger,
+    DualChatSession,
     apply_system_prompt_update,
-    build_leak_registry,
-    build_system_prompt,
-    classify_sensitive_content_cached,
-    create_chat,
-    likely_leak,
+    check_canary_leak,
+    generate_canary_token,
     run_attack_suite,
+    generate_refusal_response,
 )
 
 
@@ -27,12 +26,10 @@ def run_web_app(
         return 1
 
     app = Flask(__name__)
+    canary_token = generate_canary_token()
     current_user_context = user_context
-    current_system_prompt = build_system_prompt(current_user_context)
-    leak_registry = build_leak_registry(current_system_prompt, current_user_context)
-    client, chat = create_chat(api_key, current_system_prompt)
+    session = DualChatSession(api_key, current_user_context, canary_token, logger=logger)
     messages: List[tuple[str, str, bool, bool]] = []
-    user_history: List[str] = []
 
     template = """
 <!doctype html>
@@ -40,13 +37,12 @@ def run_web_app(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Prompt Injection Test</title>
+  <title>Prompt Injection (カナリートークン＆二重LLM構成)</title>
   <style>
     body { font-family: sans-serif; margin: 24px; max-width: 900px; }
     .msg { border: 1px solid #ccc; border-radius: 8px; padding: 10px; margin: 8px 0; }
     .user { background: #f5faff; }
     .assistant { background: #f8f8f8; }
-    .security { background: #fffcf0; border-color: #fbc02d; }
     .leak { border-color: #d32f2f; }
     textarea { width: 100%; min-height: 80px; }
     button { margin-right: 8px; }
@@ -55,8 +51,8 @@ def run_web_app(
   </style>
 </head>
 <body>
-  <h1>Prompt Injection Test</h1>
-  <p>セッションID: {{ session_id }}</p>
+  <h1>Prompt Injection (カナリートークン＆二重LLM構成)</h1>
+  <p>セッションID: {{ session_id }} | カナリートークン: <code>{{ canary_token }}</code></p>
   <form method="post" action="{{ url_for('update_user_context') }}">
     <label for="user_context"><strong>User Context</strong></label><br>
     <textarea id="user_context" name="user_context" placeholder="ユーザ情報を入力">{{ user_context }}</textarea><br>
@@ -76,15 +72,9 @@ def run_web_app(
     </form>
   </div>
   <hr>
-    {% for role, text, leaked, show_flag in messages %}
+  {% for role, text, leaked, show_flag in messages %}
     <div class="msg {{ role }} {% if leaked %}leak{% endif %}">
-      <strong>
-        {% if role == 'security' %}🛡️ Security Guard
-        {% elif role == 'assistant' %}🤖 AI Assistant
-        {% elif role == 'user' %}👤 User
-        {% else %}{{ role }}{% endif %}
-      </strong>
-      {% if leaked and show_flag %} [LEAK DETECTED]{% endif %}<br>
+      <strong>{{ role }}</strong>{% if leaked and show_flag %} [LEAK DETECTED]{% endif %}<br>
       <pre style="white-space: pre-wrap; margin: 6px 0 0 0;">{{ text }}</pre>
     </div>
   {% endfor %}
@@ -98,12 +88,13 @@ def run_web_app(
             template,
             messages=messages,
             session_id=logger.session_id,
+            canary_token=canary_token,
             user_context=current_user_context,
         )
 
     @app.post("/user-context")
     def update_user_context():
-        nonlocal client, chat, current_user_context, current_system_prompt, leak_registry
+        nonlocal session, current_user_context
         updated = (request.form.get("user_context") or "").strip()
         if not updated:
             return redirect(url_for("index"))
@@ -111,91 +102,73 @@ def run_web_app(
         try:
             (
                 current_user_context,
-                current_system_prompt,
-                leak_registry,
-                client,
-                chat,
+                session,
             ) = apply_system_prompt_update(
                 api_key=api_key,
                 user_context=updated,
+                canary_token=canary_token,
                 logger=logger,
             )
         except ValueError:
             return redirect(url_for("index"))
-
-        user_history.clear()
-        messages.append(("security", "[INFO] User Context を更新し、新しい会話セッションを開始しました。", False, False))
+ 
+        messages.append(("assistant", "[INFO] User Context を更新し、新しい会話セッションを開始しました。", False, False))
         return redirect(url_for("index"))
 
     @app.post("/send")
     def send():
-        nonlocal client, chat
+        nonlocal session
         text = (request.form.get("message") or "").strip()
         if not text:
             return redirect(url_for("index"))
 
-        input_class = classify_sensitive_content_cached(text=text, client=client)
-        if input_class.is_sensitive:
-            messages.append(
-                (
-                    "security",
-                    f"[INPUT RISK:{input_class.risk}] {', '.join(input_class.categories) or input_class.rationale}",
-                    False,
-                    False,
-                )
-            )
-
-        logger.write(mode="chat", role="user", message=text)
-        try:
-            resp = chat.send_message(text)
-        except RuntimeError as e:
-            if "client has been closed" not in str(e):
-                raise
-            client, chat = create_chat(api_key, current_system_prompt)
-            for prev in user_history:
-                chat.send_message(prev)
-            resp = chat.send_message(text)
-
-        answer = resp.text or ""
-        leak_result = likely_leak(answer, leak_registry, client=client)
-        leaked = leak_result.leaked
-        logger.write(mode="chat", role="assistant", message=answer, leak_detected=leaked)
-        user_history.append(text)
-        messages.append(("user", text, False, False))
-        flag = "リーク" if leaked else "安全"
-        if leaked:
-            messages.append(("security", f"[LEAK DETECTED] セキュリティ保護のため、AIの回答を遮断しました。", True, False))
+        input_text = text
+        logger.write(mode="chat", role="user", message=input_text)
         
-        answer = f"[{flag}] {answer}"
-        messages.append(("assistant", answer, leaked, True))
+        answer = session.send_message(input_text)
+        leaked = check_canary_leak(answer, canary_token)
+        
+        if leaked:
+            # リーク時は安全なお断りメッセージを生成して差し替える
+            answer = generate_refusal_response(api_key)
+            
+        logger.write(mode="chat", role="assistant", message=answer, leak_detected=leaked)
+        messages.append(("user", text, False, False))
+        
+        status = "遮断" if leaked else "安全"
+        display_answer = f"[{status}] {answer}"
+        messages.append(("assistant", display_answer, leaked, True))
         return redirect(url_for("index"))
 
     @app.post("/attack")
     def attack():
-        nonlocal client, chat
+        nonlocal session
         try:
-            results = run_attack_suite(chat, leak_registry, logger=logger, client=client)
+            results = run_attack_suite(session, logger=logger)
         except RuntimeError as e:
             if "client has been closed" not in str(e):
                 raise
-            client, chat = create_chat(api_key, current_system_prompt)
-            for prev in user_history:
-                chat.send_message(prev)
-            results = run_attack_suite(chat, leak_registry, logger=logger, client=client)
+            session = DualChatSession(api_key, current_user_context, canary_token, logger=logger)
+            results = run_attack_suite(session, logger=logger)
 
-        for prompt, reply, leaked in results:
-            status = "リーク" if leaked else "安全"
-            user_history.append(prompt)
-            messages.append(("user", f"[ATTACK] {prompt}", False, False))
-            messages.append(("assistant", f"[{status}] {reply}", leaked, True))
+        for res in results:
+            leaked = check_canary_leak(res.reply, canary_token)
+            
+            reply_text = res.reply
+            if leaked:
+                reply_text = generate_refusal_response(api_key)
+                
+            status = "遮断" if leaked else "安全"
+            messages.append(("user", f"[ATTACK] {res.prompt}", False, False))
+            messages.append(("assistant", f"[{status}] {reply_text}", leaked, True))
         return redirect(url_for("index"))
 
     @app.post("/reset")
     def reset():
-        nonlocal client, chat
-        client, chat = create_chat(api_key, current_system_prompt)
+        nonlocal session, canary_token
+        canary_token = generate_canary_token()
+        session = DualChatSession(api_key, current_user_context, canary_token, logger=logger)
         messages.clear()
-        user_history.clear()
         return redirect(url_for("index"))
 
     print(f"Web UI 起動: http://{host}:{port}")
